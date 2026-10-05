@@ -238,14 +238,40 @@ function saveBlob(blob, name) {
 }
 
 const toBlob = (c, type, q) => new Promise((r) => c.toBlob(r, type, q))
+const ext = (type) => (type === 'image/png' ? 'png' : 'jpg')
 
-async function exportImage(type) {
-  const p = current.value
-  exporting.value = '輸出中…'
+// 可以用系統分享表單存圖（手機上會出現「儲存影像」直接進相簿）
+const canShareFiles = (() => {
   try {
-    const c = await renderFull(p)
-    const blob = await toBlob(c, type, 0.92)
-    saveBlob(blob, `${p.name}-scan.${type === 'image/png' ? 'png' : 'jpg'}`)
+    return !!navigator.canShare?.({ files: [new File([''], 'a.jpg', { type: 'image/jpeg' })] })
+  } catch {
+    return false
+  }
+})()
+const exportMenu = ref(false)
+const pendingShare = ref(null) // 算圖太久導致使用者手勢過期時，改成再點一次
+
+async function renderFiles(list, type) {
+  const files = []
+  for (const [i, p] of list.entries()) {
+    exporting.value = list.length > 1 ? `圖片 ${i + 1} / ${list.length}` : '輸出中…'
+    const blob = await toBlob(await renderFull(p), type, 0.92)
+    const suffix = list.length > 1 ? `-${pages.value.indexOf(p) + 1}` : ''
+    files.push(new File([blob], `${p.name}-scan${suffix}.${ext(type)}`, { type }))
+  }
+  return files
+}
+
+async function exportImages(type, scope = 'all') {
+  exportMenu.value = false
+  const list = scope === 'all' ? pages.value : [current.value]
+  try {
+    const files = await renderFiles(list, type)
+    for (const [i, f] of files.entries()) {
+      saveBlob(f, f.name)
+      // 連續下載時稍微間隔，避免瀏覽器擋掉
+      if (i < files.length - 1) await new Promise((r) => setTimeout(r, 350))
+    }
   } catch (e) {
     error.value = e.message
   } finally {
@@ -253,7 +279,33 @@ async function exportImage(type) {
   }
 }
 
+async function shareImages(scope = 'all') {
+  exportMenu.value = false
+  const list = scope === 'all' ? pages.value : [current.value]
+  try {
+    const files = await renderFiles(list, 'image/jpeg')
+    exporting.value = ''
+    await shareFiles(files)
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    exporting.value = ''
+  }
+}
+
+async function shareFiles(files) {
+  try {
+    await navigator.share({ files })
+    pendingShare.value = null
+  } catch (e) {
+    if (e.name === 'AbortError') pendingShare.value = null
+    else if (e.name === 'NotAllowedError') pendingShare.value = files
+    else throw e
+  }
+}
+
 async function exportPdf() {
+  exportMenu.value = false
   exporting.value = '準備 PDF…'
   try {
     const { jsPDF } = await import('jspdf')
@@ -298,15 +350,30 @@ async function exportPdf() {
       <div class="top-actions">
         <button class="btn ghost" @click="cameraInput.click()">拍照</button>
         <button class="btn ghost" @click="fileInput.click()">＋ 加入圖片</button>
-        <button class="btn primary" :disabled="!pages.length || !!exporting" @click="exportPdf">
-          {{ exporting.startsWith('PDF') || exporting.startsWith('準備') ? exporting : '匯出 PDF' }}
-        </button>
+        <div class="menu-wrap">
+          <button class="btn primary" :disabled="!pages.length || !!exporting" @click="exportMenu = !exportMenu">
+            {{ exporting || '匯出 ▾' }}
+          </button>
+          <div v-if="exportMenu" class="menu-backdrop" @click="exportMenu = false" />
+          <div v-if="exportMenu" class="menu">
+            <p class="menu-title">全部 {{ pages.length }} 頁</p>
+            <button @click="exportPdf"><b>PDF</b><span>合併成一份文件</span></button>
+            <button @click="exportImages('image/jpeg')"><b>JPG</b><span>{{ pages.length > 1 ? '每頁一張圖片' : '圖片' }}</span></button>
+            <button @click="exportImages('image/png')"><b>PNG</b><span>無損圖片</span></button>
+            <button v-if="canShareFiles" @click="shareImages()"><b>存到相簿</b><span>或分享到其他 App</span></button>
+          </div>
+        </div>
       </div>
       <input ref="fileInput" type="file" accept="image/*" multiple hidden @change="onPick" />
       <input ref="cameraInput" type="file" accept="image/*" capture="environment" hidden @change="onPick" />
     </header>
 
     <p v-if="error" class="error" @click="error = ''">{{ error }}　✕</p>
+    <p v-if="pendingShare" class="notice">
+      圖片已準備好
+      <button class="btn primary" @click="shareFiles(pendingShare)">儲存 / 分享</button>
+      <button class="link" @click="pendingShare = null">取消</button>
+    </p>
 
     <!-- 空狀態 -->
     <main v-if="!pages.length" class="empty">
@@ -411,9 +478,12 @@ async function exportPdf() {
           <div class="export">
             <h3>下載這一頁</h3>
             <div class="row">
-              <button class="btn primary" :disabled="!!exporting" @click="exportImage('image/jpeg')">JPG</button>
-              <button class="btn ghost" :disabled="!!exporting" @click="exportImage('image/png')">PNG</button>
+              <button class="btn primary" :disabled="!!exporting" @click="exportImages('image/jpeg', 'current')">JPG</button>
+              <button class="btn ghost" :disabled="!!exporting" @click="exportImages('image/png', 'current')">PNG</button>
             </div>
+            <button v-if="canShareFiles" class="btn ghost wide save-photo" :disabled="!!exporting" @click="shareImages('current')">
+              存到相簿 / 分享
+            </button>
             <p v-if="exporting === '輸出中…'" class="muted">輸出中…</p>
           </div>
         </template>
